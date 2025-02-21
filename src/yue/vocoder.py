@@ -35,9 +35,9 @@ def save_audio(wav: torch.Tensor, path: tp.Union[Path, str], sample_rate: int, r
     path = str(Path(path).with_suffix('.mp3'))
     torchaudio.save(path, wav, sample_rate=sample_rate)
 
-def process_audio(input_file, output_file, rescale, device, decoder, soundstream):
-    compressed = np.load(input_file, allow_pickle=True).astype(np.int16)
-    print(f"Processing {input_file}")
+def process_audio(input_array: np.ndarray, output_file, rescale, device, decoder, soundstream):
+    compressed = input_array.astype(np.int16)
+    print(f"Processing {input_array.shape[0]} samples")
     print(f"Compressed shape: {compressed.shape}")
     
     compressed = torch.as_tensor(compressed, dtype=torch.long).unsqueeze(1)
