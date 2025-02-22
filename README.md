@@ -9,6 +9,8 @@ Optimized implementation of [multimodal-art-projection/YuE](https://github.com/m
 - updated genres.txt and lyrics.txt
 - 4 segments in length
 - default batch size 16 for stage 2 and cache size for both stages is set to 32k
+- max tokens is set to 2048 per segment (~20 seconds)
+- total song length generated: 1 minute 21 seconds
 
 #### ExLlamav2 implementation
 
