@@ -917,7 +917,11 @@ def main():
     vocal_decoder, inst_decoder = build_codec_model(args.config_path, args.vocal_decoder_path, args.inst_decoder_path)
     empty_gpu_cache(torch.cuda.is_available())
 
-    print(f">> Creating pipeline for {args.stage1_use_exl2} ...")
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
+
+    print(f">> Creating pipeline for stage 1 using exl2={args.stage1_use_exl2} ...")
+    start_event.record()
     if args.stage1_use_exl2:
         pipeline = Stage1Pipeline_EXL2(
             model_path=args.stage1_model,
@@ -939,8 +943,41 @@ def main():
             mmtokenizer=mmtokenizer,
             codec_model=codec_model,
         )
+    end_event.record()
+    torch.cuda.synchronize()
+    elapsed_time_ms = start_event.elapsed_time(end_event)
+    print(f"Pipeline creation execution time: {elapsed_time_ms:.4f} ms\n")
+
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
+
+    print(f">> Creating pipeline for stage 2 using exl2={args.stage2_use_exl2} ...")    
+    start_event.record()
+    if args.stage2_use_exl2:
+        pipeline2 = Stage2Pipeline_EXL2(
+            model_path=args.stage2_model,
+            device=device,
+            cache_size=args.stage2_cache_size,
+            cache_mode=args.stage2_cache_mode,
+            mmtokenizer=mmtokenizer,
+        )
+    else:
+        pipeline2 = Stage2Pipeline_HF(
+            model_path=args.stage2_model,
+            device=device,
+            batch_size=args.stage2_batch_size,
+            mmtokenizer=mmtokenizer,
+        )
+    end_event.record()
+    torch.cuda.synchronize()
+    elapsed_time_ms = start_event.elapsed_time(end_event)
+    print(f"Stage 2 pipeline preparation execution time: {elapsed_time_ms:.4f} ms\n")
+
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
 
     print(f">> Generating stage 1...")
+    start_event.record()
     # Load tokenizer and models
     raw_output = pipeline.generate(
         use_dual_tracks_prompt=args.use_dual_tracks_prompt,
@@ -956,34 +993,45 @@ def main():
         prompt_end_time=args.prompt_end_time,
         sample_settings=SampleSettings(use_guidance=not args.stage1_no_guidance, repetition_penalty=args.repetition_penalty),
     )
+    end_event.record()
+    torch.cuda.synchronize()
+    elapsed_time_ms = start_event.elapsed_time(end_event)
+    print(f"Stage 1 execution time: {elapsed_time_ms:.4f} ms\n")
+
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
 
     print(f">> Preprocessing for stage 2...")
+    start_event.record()
     #### STAGE 2
     vocals, instrumentals = pipeline.post_process_for_next_stage(
         raw_output, args.use_audio_prompt, args.use_dual_tracks_prompt
     )
+    end_event.record()
+    torch.cuda.synchronize()
+    elapsed_time_ms = start_event.elapsed_time(end_event)
+    print(f"Stage 2 pre-processing time: {elapsed_time_ms:.4f} ms\n")
 
-    print(f">> Creating pipeline for stage 2 with {args.stage2_use_exl2} ...")
-    if args.stage2_use_exl2:
-        pipeline = Stage2Pipeline_EXL2(
-            model_path=args.stage2_model,
-            device=device,
-            cache_size=args.stage2_cache_size,
-            cache_mode=args.stage2_cache_mode,
-            mmtokenizer=mmtokenizer,
-        )
-    else:
-        pipeline = Stage2Pipeline_HF(
-            model_path=args.stage2_model,
-            device=device,
-            batch_size=args.stage2_batch_size,
-            mmtokenizer=mmtokenizer,
-        )
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
 
     print(">> Generating stage 2...")
-    outputs = pipeline.generate(vocals, instrumentals, args.output_dir)
+    start_event.record()
+    outputs = pipeline2.generate(vocals, instrumentals, args.output_dir)
+    end_event.record()
+    torch.cuda.synchronize()
+    elapsed_time_ms = start_event.elapsed_time(end_event)
+    print(f"Stage 2 execution time: {elapsed_time_ms:.4f} ms\n")
+
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
 
     print(">> Postprocessing final...")
+    start_event.record()
     post_process(outputs[0], outputs[1], codec_model, vocal_decoder, inst_decoder, device, args.output_dir, args.rescale)
+    end_event.record()
+    torch.cuda.synchronize()
+    elapsed_time_ms = start_event.elapsed_time(end_event)
+    print(f"Final post-processing time: {elapsed_time_ms:.4f} ms\n")
 
     print(f">> Done.")
