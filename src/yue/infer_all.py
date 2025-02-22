@@ -10,6 +10,8 @@ from collections import Counter
 
 import numpy as np
 import torch
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.set_float32_matmul_precision("high")
 import torch.nn.functional as F
 import torchaudio
 import soundfile as sf
@@ -30,7 +32,7 @@ from post_process_audio import replace_low_freq_with_energy_matched
 from vocoder import build_codec_model, process_audio
 from vocos import VocosDecoder
 
-from .utils import empty_gpu_cache
+from utils import empty_gpu_cache
 
 
 @dataclass
@@ -232,7 +234,7 @@ class Stage1Pipeline_HF(Stage1Pipeline):
         super().__init__(device, **kwargs)
 
         # Load HF model
-        self.model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=torch.float16, attn_implementation="flash_attention_2", device_map=self.device)
+        self.model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=torch.float16, attn_implementation="sdpa", device_map=self.device)
         self.model.eval()
         # if torch.__version__ >= "2.0.0":
         #     self.model = torch.compile(self.model)
@@ -304,6 +306,7 @@ class Stage1Pipeline_HF(Stage1Pipeline):
                 guidance_scale=sample_settings.guidance_scale_seg0 if i == 0 else sample_settings.guidance_scale,
                 past_key_values=past_key_values,
             )
+            empty_gpu_cache(self.is_cuda)
 
             if output_seq[0][-1].item() != self.mmtokenizer.eoa:
                 tensor_eoa = torch.tensor([[self.mmtokenizer.eoa]], dtype=torch.long, device=output_seq.device)
@@ -457,13 +460,15 @@ class Stage1Pipeline_EXL2(Stage1Pipeline):
                 # End on EOA
                 if sample[0].item() == self.mmtokenizer.eoa:
                     break
-
+                empty_gpu_cache(self.is_cuda)
+                
             # Make sure sequence ends with EOA if we reached max_new_tokens
             else:
                 sample = torch.tensor([[self.mmtokenizer.eoa]] * bsz, dtype=torch.long)
                 seq = torch.cat((seq, sample), dim=-1)
                 # Update cache with forced token
                 self.model.forward(sample, cache=cache)
+                empty_gpu_cache(self.is_cuda)
 
         raw_output = seq[:1, :]
         empty_gpu_cache(self.is_cuda)
@@ -573,7 +578,7 @@ class Stage2Pipeline_HF(Stage2Pipeline):
         super().__init__(device, **kwargs)
         self.batch_size = batch_size
 
-        self.model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=torch.float16, attn_implementation="flash_attention_2")
+        self.model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=torch.float16, attn_implementation="sdpa")
         self.model.to(device)
         self.model.eval()
         # if torch.__version__ >= "2.0.0":
@@ -609,6 +614,7 @@ class Stage2Pipeline_HF(Stage2Pipeline):
                 logits_processor=block_list,
                 past_key_values=past_key_values,
             )
+            empty_gpu_cache(self.is_cuda)
 
             assert stage2_output.shape[1] - prompt_ids.shape[1] == 7, f"output new tokens={stage2_output.shape[1]-prompt_ids.shape[1]}"
             prompt_ids = stage2_output
@@ -812,7 +818,7 @@ def save_audio(wav: torch.Tensor, path, sample_rate: int, rescale: bool = False)
     limit = 0.99
     max_val = wav.abs().max()
     wav = wav * min(limit / max_val, 1) if rescale else wav.clamp(-limit, limit)
-    torchaudio.save(str(path), wav, sample_rate=sample_rate, encoding="PCM_S", bits_per_sample=16)
+    torchaudio.save(str(path), wav.detach().cpu(), sample_rate=sample_rate, encoding="PCM_S", bits_per_sample=16)
 
 
 def post_process(vocals: np.ndarray, instrumentals: np.ndarray, codec_model: SoundStream, vocal_decoder: VocosDecoder, inst_decoder: VocosDecoder, device: torch.device, output_dir: str, rescale: bool):
@@ -1037,3 +1043,7 @@ def main():
     print(f"Final post-processing time: {elapsed_time_ms:.4f} ms\n")
 
     print(f">> Done.")
+
+
+if __name__ == "__main__":
+    main()
