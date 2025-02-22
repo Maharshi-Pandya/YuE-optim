@@ -234,8 +234,9 @@ class Stage1Pipeline_HF(Stage1Pipeline):
         # Load HF model
         self.model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=torch.float16, attn_implementation="sdpa", device_map=self.device)
         self.model.eval()
-        if torch.__version__ >= "2.0.0":
-            self.model = torch.compile(self.model)
+        # if torch.__version__ >= "2.0.0":
+        #     self.model = torch.compile(self.model)
+        empty_gpu_cache(self.is_cuda)
         self.cache_size = cache_size
 
     def generate(
@@ -575,8 +576,9 @@ class Stage2Pipeline_HF(Stage2Pipeline):
         self.model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=torch.float16, attn_implementation="sdpa")
         self.model.to(device)
         self.model.eval()
-        if torch.__version__ >= "2.0.0":
-            self.model = torch.compile(self.model)
+        # if torch.__version__ >= "2.0.0":
+        #     self.model = torch.compile(self.model)
+        empty_gpu_cache(self.is_cuda)
 
     def generate_batch(self, prompt: np.array, batch_size: int):
         codec_ids, prompt_ids = self.prepare_prompt_batch(prompt, batch_size)
