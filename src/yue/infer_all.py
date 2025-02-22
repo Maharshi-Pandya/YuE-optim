@@ -232,7 +232,7 @@ class Stage1Pipeline_HF(Stage1Pipeline):
         super().__init__(device, **kwargs)
 
         # Load HF model
-        self.model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=torch.float16, attn_implementation="flash-attn", device_map=self.device)
+        self.model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=torch.float16, attn_implementation="flash_attention_2", device_map=self.device)
         self.model.eval()
         # if torch.__version__ >= "2.0.0":
         #     self.model = torch.compile(self.model)
@@ -573,7 +573,7 @@ class Stage2Pipeline_HF(Stage2Pipeline):
         super().__init__(device, **kwargs)
         self.batch_size = batch_size
 
-        self.model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=torch.float16, attn_implementation="flash-attn")
+        self.model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=torch.float16, attn_implementation="flash_attention_2")
         self.model.to(device)
         self.model.eval()
         # if torch.__version__ >= "2.0.0":
@@ -948,7 +948,7 @@ def main():
     end_event.record()
     torch.cuda.synchronize()
     elapsed_time_ms = start_event.elapsed_time(end_event)
-    print(f"Pipeline creation execution time: {elapsed_time_ms:.4f} ms\n")
+    print(f"Stage 1 Pipeline creation execution time: {elapsed_time_ms:.4f} ms\n")
 
     start_event = torch.cuda.Event(enable_timing=True)
     end_event = torch.cuda.Event(enable_timing=True)
