@@ -232,7 +232,7 @@ class Stage1Pipeline_HF(Stage1Pipeline):
         super().__init__(device, **kwargs)
 
         # Load HF model
-        self.model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=torch.float16, attn_implementation="sdpa", device_map=self.device)
+        self.model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=torch.float16, attn_implementation="flash-attn", device_map=self.device)
         self.model.eval()
         # if torch.__version__ >= "2.0.0":
         #     self.model = torch.compile(self.model)
@@ -573,7 +573,7 @@ class Stage2Pipeline_HF(Stage2Pipeline):
         super().__init__(device, **kwargs)
         self.batch_size = batch_size
 
-        self.model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=torch.float16, attn_implementation="sdpa")
+        self.model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=torch.float16, attn_implementation="flash-attn")
         self.model.to(device)
         self.model.eval()
         # if torch.__version__ >= "2.0.0":
