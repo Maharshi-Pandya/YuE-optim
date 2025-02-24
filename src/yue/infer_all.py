@@ -877,7 +877,6 @@ def post_process(vocals: np.ndarray, instrumentals: np.ndarray, codec_model: Sou
         mix_output = instrumental_output + vocal_output
         vocoder_mix = os.path.join(vocoder_mix_dir, os.path.basename(recons_mix))
         save_audio(mix_output, vocoder_mix, 44100, rescale)
-        print(f"Created mix: {vocoder_mix}")
     except RuntimeError as e:
         print(e)
         print(f"mix {vocoder_mix} failed! inst: {instrumental_output.shape}, vocal: {vocal_output.shape}")
@@ -889,7 +888,98 @@ def post_process(vocals: np.ndarray, instrumentals: np.ndarray, codec_model: Sou
 
 
 # =========================================
-#         RUN THE WHOLE FKN THING
+#         PRODUCER CONSUMER
+# =========================================
+
+import uuid
+import queue
+import threading
+
+@dataclass
+class Stage1Output:
+    raw_output: torch.Tensor
+    vocals: np.ndarray
+    instrumentals: np.ndarray
+
+
+# trigger end of inference
+SENTINEL = object()
+
+
+class Stage1Producer(threading.Thread):
+    def __init__(self, pipeline: Stage1Pipeline, input_queue: queue.Queue, intermediate_queue: queue.Queue):
+        super().__init__()
+        self.pipeline = pipeline
+        self.input_queue = input_queue
+        self.intermediate_queue = intermediate_queue
+
+    def run(self):
+        while True:
+            # blocking get
+            args = self.input_queue.get(block=True)
+            if args is SENTINEL:
+                self.intermediate_queue.put(args, block=True)
+                break
+
+            raw_output = self.pipeline.generate(
+                use_dual_tracks_prompt=args.use_dual_tracks_prompt,
+                vocal_track_prompt_path=args.vocal_track_prompt_path,
+                instrumental_track_prompt_path=args.instrumental_track_prompt_path,
+                use_audio_prompt=args.use_audio_prompt,
+                audio_prompt_path=args.audio_prompt_path,
+                genres=args.genres,
+                lyrics=args.lyrics,
+                run_n_segments=args.run_n_segments,
+                max_new_tokens=args.max_new_tokens,
+                prompt_start_time=args.prompt_start_time,
+                prompt_end_time=args.prompt_end_time,
+                sample_settings=SampleSettings(use_guidance=not args.stage1_no_guidance, repetition_penalty=args.repetition_penalty),
+            )
+            vocals, instrumentals = self.pipeline.post_process_for_next_stage(
+                raw_output, args.use_audio_prompt, args.use_dual_tracks_prompt
+            )
+
+            output = Stage1Output(raw_output, vocals, instrumentals)
+            self.intermediate_queue.put(output)
+
+
+class Stage2Consumer(threading.Thread):
+    def __init__(
+            self, pipeline: Stage2Pipeline, intermediate_queue: queue.Queue, 
+            codec_model, vocal_decoder, inst_decoder, device, 
+            output_dir, rescale
+        ):
+        super().__init__()
+        self.pipeline = pipeline
+        self.intermediate_queue = intermediate_queue
+
+        self.codec_model = codec_model
+        self.vocal_decoder = vocal_decoder
+        self.inst_decoder = inst_decoder
+        self.device = device
+        self.rescale = rescale
+
+        self.output_dir = f"{output_dir}/{uuid.uuid4().hex()}/"
+        os.makedirs(self.output_dir, exist_ok=True)
+
+    def run(self):
+        while True:
+            # blocking get
+            output = self.intermediate_queue.get(block=True)
+            if not isinstance(output, Stage1Output) and output is SENTINEL:
+                print(">> Done with all inputs")
+                break
+
+            stage2_output = self.pipeline.generate(output.vocals, output.instrumentals, self.output_dir)
+            post_process(
+                stage2_output[0], stage2_output[1], 
+                self.codec_model, self.vocal_decoder, self.inst_decoder, self.device, 
+                self.output_dir, self.rescale
+            )
+
+
+# =========================================
+#         RUN THE WHOLE THING
 # =========================================
 
 def main():

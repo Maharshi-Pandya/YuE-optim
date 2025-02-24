@@ -37,8 +37,6 @@ def save_audio(wav: torch.Tensor, path: tp.Union[Path, str], sample_rate: int, r
 
 def process_audio(input_array: np.ndarray, output_file, rescale, device, decoder, soundstream):
     compressed = input_array.astype(np.int16)
-    print(f"Processing {input_array.shape[0]} samples")
-    print(f"Compressed shape: {compressed.shape}")
     
     compressed = torch.as_tensor(compressed, dtype=torch.long).unsqueeze(1)
     compressed = soundstream.get_embed(compressed.to(device))
@@ -52,11 +50,9 @@ def process_audio(input_array: np.ndarray, output_file, rescale, device, decoder
         out = out.detach().cpu()
     duration = time() - start_time
     rtf = (out.shape[1] / 44100.0) / duration
-    print(f"Decoded in {duration:.2f}s ({rtf:.2f}x RTF)")
     
     os.makedirs(os.path.dirname(output_file), exist_ok=True)
     save_audio(out, output_file, 44100, rescale=rescale)
-    print(f"Saved: {output_file}")
     return out
 
 def find_matching_pairs(input_folder):
