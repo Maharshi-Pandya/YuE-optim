@@ -922,6 +922,7 @@ class Stage1Producer(threading.Thread):
             args = self.input_queue.get(block=True)
             if args is SENTINEL:
                 self.intermediate_queue.put(args, block=True)
+                self.input_queue.task_done()
                 break
             
             print(f">> Stage 1 processing {args.genre_txt} and {args.lyrics_txt} ...")
@@ -951,7 +952,7 @@ class Stage1Producer(threading.Thread):
             torch.cuda.synchronize()
             elapsed_time_ms = start_event.elapsed_time(end_event)
             
-            print(f">> Stage 2 execution time: {elapsed_time_ms} ms")
+            print(f">> Stage 1 execution time: {elapsed_time_ms} ms")
 
             output = Stage1Output(raw_output, vocals, instrumentals, elapsed_time_ms, args.genre_txt, args.lyrics_txt)
             self.intermediate_queue.put(output)
@@ -974,7 +975,7 @@ class Stage2Consumer(threading.Thread):
         self.device = device
         self.rescale = rescale
 
-        self.output_dir = f"{output_dir}/{uuid.uuid4().hex()}"
+        self.output_dir = output_dir
         os.makedirs(self.output_dir, exist_ok=True)
 
     def run(self):
@@ -982,18 +983,21 @@ class Stage2Consumer(threading.Thread):
             # blocking get
             output = self.intermediate_queue.get(block=True)
             if not isinstance(output, Stage1Output) and output is SENTINEL:
-                print(">> Done with all inputs")
+                print(">> Stage 2 recieved SENTINEL value")
+                self.intermediate_queue.task_done()
                 break
+
+            output_dir = f"{self.output_dir}/{uuid.uuid4().hex}"
             
             print(f"Stage 2 processing {output.genre_txt} and {output.lyrics_txt} ...")
             start_event = torch.cuda.Event(enable_timing=True)
             end_event = torch.cuda.Event(enable_timing=True)
             start_event.record()
-            stage2_output = self.pipeline.generate(output.vocals, output.instrumentals, self.output_dir)
+            stage2_output = self.pipeline.generate(output.vocals, output.instrumentals, output_dir)
             post_process(
                 stage2_output[0], stage2_output[1], 
                 self.codec_model, self.vocal_decoder, self.inst_decoder, self.device, 
-                self.output_dir, self.rescale
+                output_dir, self.rescale
             )
             end_event.record()
             torch.cuda.synchronize()
@@ -1021,6 +1025,8 @@ def create_input_queue(args) -> queue.Queue:
         with open(lyrics_file) as f:
             lyrics = f.read().strip()
 
+        args_enqueue.genre_txt = genre_file
+        args_enqueue.lyrics_txt = lyrics_file
         args_enqueue.genres = genres
         args_enqueue.lyrics = lyrics
         q.put(args_enqueue)

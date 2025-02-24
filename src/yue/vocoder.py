@@ -40,7 +40,7 @@ def process_audio(input_array: np.ndarray, output_file, rescale, device, decoder
     
     compressed = torch.as_tensor(compressed, dtype=torch.long).unsqueeze(1)
     compressed = soundstream.get_embed(compressed.to(device))
-    compressed = torch.tensor(compressed).to(device)
+    # compressed = torch.tensor(compressed).to(device)
     
     start_time = time()
     with torch.no_grad():

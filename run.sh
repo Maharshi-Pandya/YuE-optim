@@ -6,7 +6,7 @@ python src/yue/infer_all.py --stage1_use_exl2 --stage2_use_exl2 --cuda_idx 0 \
     --genre_txt ./prompt_egs/genre1.txt ./prompt_egs/genre2.txt \
     --lyrics_txt ./prompt_egs/lyrics1.txt ./prompt_egs/lyrics2.txt \
     --run_n_segments 4 \
-    --stage2_batch_size 16 \
+    --stage2_batch_size 8 \
     --stage1_cache_size 16384 \
     --stage2_cache_size 16384 \
     --output_dir ./output \
