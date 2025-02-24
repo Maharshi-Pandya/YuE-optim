@@ -900,6 +900,7 @@ class Stage1Output:
     raw_output: torch.Tensor
     vocals: np.ndarray
     instrumentals: np.ndarray
+    elapsed_time: float # ms
 
 
 # trigger end of inference
@@ -920,7 +921,11 @@ class Stage1Producer(threading.Thread):
             if args is SENTINEL:
                 self.intermediate_queue.put(args, block=True)
                 break
+            
+            start_event = torch.cuda.Event(enable_timing=True)
+            end_event = torch.cuda.Event(enable_timing=True)
 
+            start_event.record()
             raw_output = self.pipeline.generate(
                 use_dual_tracks_prompt=args.use_dual_tracks_prompt,
                 vocal_track_prompt_path=args.vocal_track_prompt_path,
@@ -938,8 +943,11 @@ class Stage1Producer(threading.Thread):
             vocals, instrumentals = self.pipeline.post_process_for_next_stage(
                 raw_output, args.use_audio_prompt, args.use_dual_tracks_prompt
             )
+            end_event.record()
+            torch.cuda.synchronize()
+            elapsed_time_ms = start_event.elapsed_time(end_event)
 
-            output = Stage1Output(raw_output, vocals, instrumentals)
+            output = Stage1Output(raw_output, vocals, instrumentals, elapsed_time_ms)
             self.intermediate_queue.put(output)
 
 
@@ -959,7 +967,7 @@ class Stage2Consumer(threading.Thread):
         self.device = device
         self.rescale = rescale
 
-        self.output_dir = f"{output_dir}/{uuid.uuid4().hex()}/"
+        self.output_dir = f"{output_dir}/{uuid.uuid4().hex()}"
         os.makedirs(self.output_dir, exist_ok=True)
 
     def run(self):
@@ -970,12 +978,21 @@ class Stage2Consumer(threading.Thread):
                 print(">> Done with all inputs")
                 break
 
+            print(f">> Stage 1 execution time: {output.elapsed_time} ms")
+            
+            start_event = torch.cuda.Event(enable_timing=True)
+            end_event = torch.cuda.Event(enable_timing=True)
+            start_event.record()
             stage2_output = self.pipeline.generate(output.vocals, output.instrumentals, self.output_dir)
             post_process(
                 stage2_output[0], stage2_output[1], 
                 self.codec_model, self.vocal_decoder, self.inst_decoder, self.device, 
                 self.output_dir, self.rescale
             )
+            end_event.record()
+            torch.cuda.synchronize()
+            elapsed_time_ms = start_event.elapsed_time(end_event)
+            print(f">> Stage 2 execution time: {elapsed_time_ms} ms")
 
 
 # =========================================
