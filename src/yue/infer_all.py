@@ -901,6 +901,8 @@ class Stage1Output:
     vocals: np.ndarray
     instrumentals: np.ndarray
     elapsed_time: float # ms
+    genre_txt: str
+    lyrics_txt: str
 
 
 # trigger end of inference
@@ -922,6 +924,8 @@ class Stage1Producer(threading.Thread):
                 self.intermediate_queue.put(args, block=True)
                 break
             
+            print(f">> Stage 1 processing {args.genre_txt} and {args.lyrics_txt} ...")
+
             start_event = torch.cuda.Event(enable_timing=True)
             end_event = torch.cuda.Event(enable_timing=True)
 
@@ -946,9 +950,12 @@ class Stage1Producer(threading.Thread):
             end_event.record()
             torch.cuda.synchronize()
             elapsed_time_ms = start_event.elapsed_time(end_event)
+            
+            print(f">> Stage 2 execution time: {elapsed_time_ms} ms")
 
-            output = Stage1Output(raw_output, vocals, instrumentals, elapsed_time_ms)
+            output = Stage1Output(raw_output, vocals, instrumentals, elapsed_time_ms, args.genre_txt, args.lyrics_txt)
             self.intermediate_queue.put(output)
+            self.input_queue.task_done()
 
 
 class Stage2Consumer(threading.Thread):
@@ -977,9 +984,8 @@ class Stage2Consumer(threading.Thread):
             if not isinstance(output, Stage1Output) and output is SENTINEL:
                 print(">> Done with all inputs")
                 break
-
-            print(f">> Stage 1 execution time: {output.elapsed_time} ms")
             
+            print(f"Stage 2 processing {output.genre_txt} and {output.lyrics_txt} ...")
             start_event = torch.cuda.Event(enable_timing=True)
             end_event = torch.cuda.Event(enable_timing=True)
             start_event.record()
@@ -994,10 +1000,35 @@ class Stage2Consumer(threading.Thread):
             elapsed_time_ms = start_event.elapsed_time(end_event)
             print(f">> Stage 2 execution time: {elapsed_time_ms} ms")
 
+            self.intermediate_queue.task_done()
+
 
 # =========================================
 #         RUN THE WHOLE THING
 # =========================================
+
+def create_input_queue(args) -> queue.Queue:
+    """
+    Creates the job queue for the producer input
+    """
+    q = queue.Queue()
+
+    # list of genres and lyrics
+    for genre_file, lyrics_file in zip(args.genre_txt, args.lyrics_txt):
+        args_enqueue = copy.deepcopy(args)
+        with open(genre_file) as f:
+            genres = f.read().strip()
+        with open(lyrics_file) as f:
+            lyrics = f.read().strip()
+
+        args_enqueue.genres = genres
+        args_enqueue.lyrics = lyrics
+        q.put(args_enqueue)
+
+    # final SENTINEL value
+    q.put(SENTINEL)
+    return q
+
 
 def main():
     args = parser.parse_args()
@@ -1012,10 +1043,8 @@ def main():
 
     device = torch.device(f"cuda:{args.cuda_idx}" if torch.cuda.is_available() else "cpu")
 
-    with open(args.genre_txt) as f:
-        genres = f.read().strip()
-    with open(args.lyrics_txt) as f:
-        lyrics = f.read().strip()
+    input_queue = create_input_queue(args)
+    intermediate_queue = queue.Queue()
 
     # loads required models
     mmtokenizer = _MMSentencePieceTokenizer(os.path.join(os.path.dirname(os.path.abspath(__file__)), "mm_tokenizer_v0.2_hf", "tokenizer.model"))
@@ -1088,68 +1117,21 @@ def main():
     elapsed_time_ms = start_event.elapsed_time(end_event)
     print(f"Stage 2 pipeline preparation execution time: {elapsed_time_ms:.4f} ms\n")
 
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
-
-    print(f">> Generating stage 1...")
-    start_event.record()
-    # Load tokenizer and models
-    raw_output = pipeline.generate(
-        use_dual_tracks_prompt=args.use_dual_tracks_prompt,
-        vocal_track_prompt_path=args.vocal_track_prompt_path,
-        instrumental_track_prompt_path=args.instrumental_track_prompt_path,
-        use_audio_prompt=args.use_audio_prompt,
-        audio_prompt_path=args.audio_prompt_path,
-        genres=genres,
-        lyrics=lyrics,
-        run_n_segments=args.run_n_segments,
-        max_new_tokens=args.max_new_tokens,
-        prompt_start_time=args.prompt_start_time,
-        prompt_end_time=args.prompt_end_time,
-        sample_settings=SampleSettings(use_guidance=not args.stage1_no_guidance, repetition_penalty=args.repetition_penalty),
+    stage1_thread = Stage1Producer(pipeline, input_queue, intermediate_queue)
+    stage2_thread = Stage2Consumer(
+        pipeline2, intermediate_queue, codec_model,
+        vocal_decoder, inst_decoder, device, args.output_dir, args.rescale
     )
-    end_event.record()
-    torch.cuda.synchronize()
-    elapsed_time_ms = start_event.elapsed_time(end_event)
-    print(f"Stage 1 execution time: {elapsed_time_ms:.4f} ms\n")
 
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
+    stage1_thread.start()
+    stage2_thread.start()
 
-    print(f">> Preprocessing for stage 2...")
-    start_event.record()
-    #### STAGE 2
-    vocals, instrumentals = pipeline.post_process_for_next_stage(
-        raw_output, args.use_audio_prompt, args.use_dual_tracks_prompt
-    )
-    end_event.record()
-    torch.cuda.synchronize()
-    elapsed_time_ms = start_event.elapsed_time(end_event)
-    print(f"Stage 2 pre-processing time: {elapsed_time_ms:.4f} ms\n")
+    input_queue.join()
+    intermediate_queue.join()
+    stage1_thread.join()
+    stage2_thread.join()
 
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
-
-    print(">> Generating stage 2...")
-    start_event.record()
-    outputs = pipeline2.generate(vocals, instrumentals, args.output_dir)
-    end_event.record()
-    torch.cuda.synchronize()
-    elapsed_time_ms = start_event.elapsed_time(end_event)
-    print(f"Stage 2 execution time: {elapsed_time_ms:.4f} ms\n")
-
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
-
-    print(">> Postprocessing final...")
-    start_event.record()
-    post_process(outputs[0], outputs[1], codec_model, vocal_decoder, inst_decoder, device, args.output_dir, args.rescale)
-    end_event.record()
-    torch.cuda.synchronize()
-    elapsed_time_ms = start_event.elapsed_time(end_event)
-    print(f"Final post-processing time: {elapsed_time_ms:.4f} ms\n")
-
-    print(f">> Done.")
+    print("Everything done.")
 
 
 if __name__ == "__main__":

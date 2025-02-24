@@ -30,12 +30,14 @@ parser.add_argument("--stage1_no_guidance", action="store_true", help="Disable c
 parser.add_argument(
     "--genre_txt",
     type=str,
+    nargs="+",
     required=True,
     help="The file path to a text file containing genre tags that describe the musical style or characteristics (e.g., instrumental, genre, mood, vocal timbre, vocal gender). This is used as part of the generation prompt.",
 )
 parser.add_argument(
     "--lyrics_txt",
     type=str,
+    nargs="+",
     required=True,
     help="The file path to a text file containing the lyrics for the music generation. These lyrics will be processed and split into structured segments to guide the generation process.",
 )
