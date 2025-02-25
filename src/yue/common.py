@@ -72,7 +72,8 @@ parser.add_argument(
 parser.add_argument("--output_dir", type=str, default="./output", help="The directory where generated outputs will be saved.")
 parser.add_argument("--keep_intermediate", action="store_true", help="If set, intermediate outputs will be saved during processing.")
 parser.add_argument("--disable_offload_model", action="store_true", help="If set, the model will not be offloaded from the GPU to CPU after Stage 1 inference.")
-parser.add_argument("--cuda_idx", type=int, default=0)
+parser.add_argument("--stage1_cuda_idx", type=int, default=0)
+parser.add_argument("--stage2_cuda_idx", type=int, default=0)
 parser.add_argument("--seed", type=int, default=None, help="An integer value to reproduce generation.")
 # Config for xcodec and upsampler
 parser.add_argument("--basic_model_config", default="./xcodec_mini_infer/final_ckpt/config.yaml", help="YAML files for xcodec configurations.")

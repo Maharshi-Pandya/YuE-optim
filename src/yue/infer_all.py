@@ -77,8 +77,9 @@ def encode_audio(codec_model, audio_prompt, device, target_bw=0.5):
 # =========================================
 
 class Stage1Pipeline:
-    def __init__(self, device: torch.device, basic_model_config: str, resume_path: str, mmtokenizer: _MMSentencePieceTokenizer = None, codec_model: SoundStream = None):
-        self.device = device
+    def __init__(self, device_idx: int, basic_model_config: str, resume_path: str, mmtokenizer: _MMSentencePieceTokenizer = None, codec_model: SoundStream = None):
+        self.device_idx = device_idx
+        self.device = torch.device(f"cuda:{device_idx}")
         self.codec_tool = CodecManipulator("xcodec", 0, 1)
         self.basic_model_config = basic_model_config
         self.resume_path = resume_path
@@ -100,7 +101,7 @@ class Stage1Pipeline:
         parameter_dict = torch.load(self.resume_path, map_location=self.device, weights_only=False)
         self.codec_model.load_state_dict(parameter_dict["codec_model"])
         self.codec_model.eval()
-        empty_gpu_cache(self.is_cuda)
+        empty_gpu_cache(self.is_cuda, self.device_idx)
 
     def get_prompt_texts(self, genres: str, lyrics: str):
         def split_lyrics(lyrics):
@@ -230,8 +231,8 @@ class Stage1Pipeline:
 
 
 class Stage1Pipeline_HF(Stage1Pipeline):
-    def __init__(self, model_path: str, device: torch.device, cache_size: int, **kwargs):
-        super().__init__(device, **kwargs)
+    def __init__(self, model_path: str, device_idx: int, cache_size: int, **kwargs):
+        super().__init__(device_idx, **kwargs)
 
         # Load HF model
         self.model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=torch.float16, attn_implementation="sdpa", device_map=self.device)
@@ -306,7 +307,7 @@ class Stage1Pipeline_HF(Stage1Pipeline):
                 guidance_scale=sample_settings.guidance_scale_seg0 if i == 0 else sample_settings.guidance_scale,
                 past_key_values=past_key_values,
             )
-            empty_gpu_cache(self.is_cuda)
+            empty_gpu_cache(self.is_cuda, self.device_idx)
 
             if output_seq[0][-1].item() != self.mmtokenizer.eoa:
                 tensor_eoa = torch.tensor([[self.mmtokenizer.eoa]], dtype=torch.long, device=output_seq.device)
@@ -316,18 +317,17 @@ class Stage1Pipeline_HF(Stage1Pipeline):
             else:
                 raw_output = output_seq
 
-        empty_gpu_cache(self.is_cuda)
+        empty_gpu_cache(self.is_cuda, self.device_idx)
         return raw_output
 
 
 class Stage1Pipeline_EXL2(Stage1Pipeline):
-    def __init__(self, model_path: str, device: torch.device, cache_size: int, cache_mode: str, **kwargs):
-        super().__init__(device, **kwargs)
+    def __init__(self, model_path: str, device_idx: int, cache_size: int, cache_mode: str, **kwargs):
+        super().__init__(device_idx, **kwargs)
 
-        assert device != "cpu", "ExLlamaV2 does not support CPU inference."
+        assert self.device != "cpu", "ExLlamaV2 does not support CPU inference."
 
         # Load EXL2 model
-        device_idx = self.device.index
         gpu_split = [0] * torch.cuda.device_count()
         gpu_split[device_idx] = 9999
         exl2_config = ExLlamaV2Config(model_path)
@@ -460,7 +460,7 @@ class Stage1Pipeline_EXL2(Stage1Pipeline):
                 # End on EOA
                 if sample[0].item() == self.mmtokenizer.eoa:
                     break
-                empty_gpu_cache(self.is_cuda)
+                empty_gpu_cache(self.is_cuda, self.device_idx)
                 
             # Make sure sequence ends with EOA if we reached max_new_tokens
             else:
@@ -468,10 +468,10 @@ class Stage1Pipeline_EXL2(Stage1Pipeline):
                 seq = torch.cat((seq, sample), dim=-1)
                 # Update cache with forced token
                 self.model.forward(sample, cache=cache)
-                empty_gpu_cache(self.is_cuda)
+                empty_gpu_cache(self.is_cuda, self.device_idx)
 
         raw_output = seq[:1, :]
-        empty_gpu_cache(self.is_cuda)
+        empty_gpu_cache(self.is_cuda, self.device_idx)
         return raw_output
 
 
@@ -498,9 +498,9 @@ def split_bsz(bsz, maxbsz):
 
 
 class Stage2Pipeline:
-    def __init__(self, device: torch.device, mmtokenizer: _MMSentencePieceTokenizer = None):
-        self.device = device
-
+    def __init__(self, device_idx: int, mmtokenizer: _MMSentencePieceTokenizer = None):
+        self.device_idx = device_idx
+        self.device = torch.device(f"cuda:{device_idx}")
         self.codec_tool = CodecManipulator("xcodec", 0, 1)
         self.codec_tool_stage2 = CodecManipulator("xcodec", 0, 8)
 
@@ -574,16 +574,16 @@ class Stage2Pipeline:
 
 class Stage2Pipeline_HF(Stage2Pipeline):
 
-    def __init__(self, model_path: str, device: torch.device, batch_size: int, **kwargs):
-        super().__init__(device, **kwargs)
+    def __init__(self, model_path: str, device_idx: int, batch_size: int, **kwargs):
+        super().__init__(device_idx, **kwargs)
         self.batch_size = batch_size
 
         self.model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=torch.float16, attn_implementation="sdpa")
-        self.model.to(device)
+        self.model.to(self.device)
         self.model.eval()
         # if torch.__version__ >= "2.0.0":
         #     self.model = torch.compile(self.model)
-        empty_gpu_cache(self.is_cuda)
+        empty_gpu_cache(self.is_cuda, self.device_idx)
 
     def generate_batch(self, prompt: np.array, batch_size: int):
         codec_ids, prompt_ids = self.prepare_prompt_batch(prompt, batch_size)
@@ -614,7 +614,7 @@ class Stage2Pipeline_HF(Stage2Pipeline):
                 logits_processor=block_list,
                 past_key_values=past_key_values,
             )
-            empty_gpu_cache(self.is_cuda)
+            empty_gpu_cache(self.is_cuda, self.device_idx)
 
             assert stage2_output.shape[1] - prompt_ids.shape[1] == 7, f"output new tokens={stage2_output.shape[1]-prompt_ids.shape[1]}"
             prompt_ids = stage2_output
@@ -667,21 +667,20 @@ class Stage2Pipeline_HF(Stage2Pipeline):
 
             output = self.fix_output(output)
             outputs.append(output)
-            empty_gpu_cache(self.is_cuda)
+            empty_gpu_cache(self.is_cuda, self.device_idx)
         return outputs
 
 
 class Stage2Pipeline_EXL2(Stage2Pipeline):
 
-    def __init__(self, model_path: str, device: torch.device, cache_size: int, cache_mode: str, **kwargs):
-        super().__init__(device, **kwargs)
+    def __init__(self, model_path: str, device_idx: int, cache_size: int, cache_mode: str, **kwargs):
+        super().__init__(device_idx, **kwargs)
 
         self.cache_size = cache_size
 
-        assert device != "cpu", "ExLlamaV2 does not support CPU inference."
+        assert self.device != "cpu", "ExLlamaV2 does not support CPU inference."
 
         # Load EXL2 model
-        device_idx = self.device.index
         gpu_split = [0] * torch.cuda.device_count()
         gpu_split[device_idx] = 9999
         exl2_config = ExLlamaV2Config(model_path)
@@ -793,7 +792,7 @@ class Stage2Pipeline_EXL2(Stage2Pipeline):
 
             # Release cache tensors
             del cache
-            empty_gpu_cache(self.is_cuda)
+            empty_gpu_cache(self.is_cuda, self.device_idx)
 
         # Unshuffle and recombine output parts
         output = []
@@ -1047,51 +1046,74 @@ def main():
     if args.seed is not None:
         seed_everything(args.seed)
 
-    device = torch.device(f"cuda:{args.cuda_idx}" if torch.cuda.is_available() else "cpu")
+    device = None
+    device1, device2 = None, None   # for separate codec models
+
+    if args.stage1_cuda_idx == args.stage2_cuda_idx:
+        device = torch.device(f"cuda:{args.stage1_cuda_idx}" if torch.cuda.is_available() else "cpu")
+    else:
+        device1 = torch.device(f"cuda:{args.stage1_cuda_idx}" if torch.cuda.is_available() else "cpu")
+        device2 = torch.device(f"cuda:{args.stage2_cuda_idx}" if torch.cuda.is_available() else "cpu")
 
     input_queue = create_input_queue(args)
     intermediate_queue = queue.Queue()
 
     # loads required models
     mmtokenizer = _MMSentencePieceTokenizer(os.path.join(os.path.dirname(os.path.abspath(__file__)), "mm_tokenizer_v0.2_hf", "tokenizer.model"))
-    empty_gpu_cache(torch.cuda.is_available())
 
     model_config = OmegaConf.load(args.basic_model_config)
     assert model_config.generator.name == "SoundStream"
-    codec_model = SoundStream(**model_config.generator.config).to(device)
-    parameter_dict = torch.load(args.resume_path, map_location=device, weights_only=False)
-    codec_model.load_state_dict(parameter_dict["codec_model"])
-    codec_model.eval()
-    empty_gpu_cache(torch.cuda.is_available())
+    if args.stage1_cuda_idx == args.stage2_cuda_idx:
+        codec_model = SoundStream(**model_config.generator.config).to(device)
+        parameter_dict = torch.load(args.resume_path, map_location=device, weights_only=False)
+        codec_model.load_state_dict(parameter_dict["codec_model"])
+        codec_model.eval()
+        empty_gpu_cache(torch.cuda.is_available(), args.stage1_cuda_idx)
+    else:
+        codec_model1 = SoundStream(**model_config.generator.config).to(device1)
+        parameter_dict1 = torch.load(args.resume_path, map_location=device1, weights_only=False)
+        codec_model1.load_state_dict(parameter_dict1["codec_model"])
+        codec_model1.eval()
+        empty_gpu_cache(torch.cuda.is_available(), device1.index)
 
-    vocal_decoder, inst_decoder = build_codec_model(args.config_path, args.vocal_decoder_path, args.inst_decoder_path)
-    empty_gpu_cache(torch.cuda.is_available())
+        codec_model2 = SoundStream(**model_config.generator.config).to(device2)
+        parameter_dict2 = torch.load(args.resume_path, map_location=device2, weights_only=False)
+        codec_model2.load_state_dict(parameter_dict2["codec_model"])
+        codec_model2.eval()
+        empty_gpu_cache(torch.cuda.is_available(), device2.index)
+
+    if args.stage1_cuda_idx == args.stage2_cuda_idx:
+        vocal_decoder, inst_decoder = build_codec_model(args.config_path, args.vocal_decoder_path, args.inst_decoder_path, device)
+        empty_gpu_cache(torch.cuda.is_available(), args.stage1_cuda_idx)
+    else:
+        vocal_decoder, inst_decoder = build_codec_model(args.config_path, args.vocal_decoder_path, args.inst_decoder_path, device2)
+        empty_gpu_cache(torch.cuda.is_available(), args.stage2_cuda_idx)
 
     start_event = torch.cuda.Event(enable_timing=True)
     end_event = torch.cuda.Event(enable_timing=True)
 
-    print(f">> Creating pipeline for stage 1 using exl2={args.stage1_use_exl2} ...")
+    print(f">> Creating pipeline for stage 1 using exl2={args.stage1_use_exl2} on device:{args.stage1_cuda_idx} ...")
     start_event.record()
     if args.stage1_use_exl2:
         pipeline = Stage1Pipeline_EXL2(
             model_path=args.stage1_model,
-            device=device,
+            device_idx=args.stage1_cuda_idx,
             basic_model_config=args.basic_model_config,
             resume_path=args.resume_path,
             cache_size=args.stage1_cache_size,
             cache_mode=args.stage1_cache_mode,
             mmtokenizer=mmtokenizer,
-            codec_model=codec_model,
+            codec_model=codec_model if device is not None else codec_model1,
         )
     else:
         pipeline = Stage1Pipeline_HF(
             model_path=args.stage1_model,
-            device=device,
+            device_idx=args.stage1_cuda_idx,
             basic_model_config=args.basic_model_config,
             resume_path=args.resume_path,
             cache_size=args.stage1_cache_size,
             mmtokenizer=mmtokenizer,
-            codec_model=codec_model,
+            codec_model=codec_model if device is not None else codec_model1,
         )
     end_event.record()
     torch.cuda.synchronize()
@@ -1101,12 +1123,12 @@ def main():
     start_event = torch.cuda.Event(enable_timing=True)
     end_event = torch.cuda.Event(enable_timing=True)
 
-    print(f">> Creating pipeline for stage 2 using exl2={args.stage2_use_exl2} ...")    
+    print(f">> Creating pipeline for stage 2 using exl2={args.stage2_use_exl2} on device:{args.stage2_cuda_idx} ...")    
     start_event.record()
     if args.stage2_use_exl2:
         pipeline2 = Stage2Pipeline_EXL2(
             model_path=args.stage2_model,
-            device=device,
+            device_idx=args.stage2_cuda_idx,
             cache_size=args.stage2_cache_size,
             cache_mode=args.stage2_cache_mode,
             mmtokenizer=mmtokenizer,
@@ -1114,7 +1136,7 @@ def main():
     else:
         pipeline2 = Stage2Pipeline_HF(
             model_path=args.stage2_model,
-            device=device,
+            device_idx=args.stage2_cuda_idx,
             batch_size=args.stage2_batch_size,
             mmtokenizer=mmtokenizer,
         )
@@ -1125,8 +1147,10 @@ def main():
 
     stage1_thread = Stage1Producer(pipeline, input_queue, intermediate_queue)
     stage2_thread = Stage2Consumer(
-        pipeline2, intermediate_queue, codec_model,
-        vocal_decoder, inst_decoder, device, args.output_dir, args.rescale
+        pipeline2, intermediate_queue, codec_model if device is not None else codec_model2,
+        vocal_decoder, inst_decoder, 
+        device if args.stage1_cuda_idx == args.stage2_cuda_idx else device2, 
+        args.output_dir, args.rescale
     )
 
     stage1_thread.start()

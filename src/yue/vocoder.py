@@ -17,12 +17,12 @@ def build_soundstream_model(config):
     model = eval(config.generator.name)(**config.generator.config)
     return model
 
-def build_codec_model(config_path, vocal_decoder_path, inst_decoder_path):
+def build_codec_model(config_path, vocal_decoder_path, inst_decoder_path, device):
     vocal_decoder = VocosDecoder.from_hparams(config_path=config_path)
     vocal_decoder.load_state_dict(torch.load(vocal_decoder_path))
     inst_decoder = VocosDecoder.from_hparams(config_path=config_path)
     inst_decoder.load_state_dict(torch.load(inst_decoder_path))
-    return vocal_decoder, inst_decoder
+    return vocal_decoder.to(device), inst_decoder.to(device)
 
 def save_audio(wav: torch.Tensor, path: tp.Union[Path, str], sample_rate: int, rescale: bool = False):
     limit = 0.99
@@ -45,11 +45,11 @@ def process_audio(input_array: np.ndarray, output_file, rescale, device, decoder
     start_time = time()
     with torch.no_grad():
         decoder.eval()
-        decoder = decoder.to(device)
+        # decoder = decoder.to(device)
         out = decoder(compressed)
         out = out.detach().cpu()
     duration = time() - start_time
-    rtf = (out.shape[1] / 44100.0) / duration
+    # rtf = (out.shape[1] / 44100.0) / duration
     
     os.makedirs(os.path.dirname(output_file), exist_ok=True)
     save_audio(out, output_file, 44100, rescale=rescale)
