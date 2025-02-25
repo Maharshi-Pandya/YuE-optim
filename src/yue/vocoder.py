@@ -38,16 +38,21 @@ def save_audio(wav: torch.Tensor, path: tp.Union[Path, str], sample_rate: int, r
 def process_audio(input_array: np.ndarray, output_file, rescale, device, decoder, soundstream):
     compressed = input_array.astype(np.int16)
     
-    compressed = torch.as_tensor(compressed, dtype=torch.long).unsqueeze(1)
-    compressed = soundstream.get_embed(compressed.to(device))
+    # create directly on device
+    compressed = torch.as_tensor(compressed, dtype=torch.long, device=device).unsqueeze(1)
+    compressed = soundstream.get_embed(compressed)
+    ## redundant move to device below
     # compressed = torch.tensor(compressed).to(device)
     
     start_time = time()
-    with torch.no_grad():
-        decoder.eval()
+    with torch.inference_mode():
+        ## redundant eval and move to device below
+        # decoder.eval()
         # decoder = decoder.to(device)
         out = decoder(compressed)
-        out = out.detach().cpu()
+        ## don't need detach here
+        # out = out.detach().cpu()
+        out = out.cpu()
     duration = time() - start_time
     # rtf = (out.shape[1] / 44100.0) / duration
     

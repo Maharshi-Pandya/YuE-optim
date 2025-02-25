@@ -1,6 +1,7 @@
 import os
 import random
 import re
+import time
 import math
 import copy
 
@@ -344,6 +345,7 @@ class Stage1Pipeline_EXL2(Stage1Pipeline):
 
         # TODO: Output layer could be trimmed here to avoid masking out the first 32k tokens during generation
 
+    @torch.inference_mode()
     def generate(
         self,
         use_dual_tracks_prompt: bool,
@@ -697,113 +699,165 @@ class Stage2Pipeline_EXL2(Stage2Pipeline):
         # Define cache
         self.cache_mode = get_cache_class(cache_mode)
 
+        self._prepare_static_tokens()
+        
+        self.first_logit = 46358
+        self.last_logit = 53526
+        
+    def _prepare_static_tokens(self):
+        self.prefix = torch.tensor([[self.mmtokenizer.soa, self.mmtokenizer.stage_1]], dtype=torch.long)
+        self.suffix = torch.tensor([[self.mmtokenizer.stage_2]], dtype=torch.long)
+
+    def split_bsz(self, bsz, maxbsz):
+        if bsz <= maxbsz:
+            return [(0, bsz)]
+        if bsz % maxbsz == 0:
+            return [(i, i + maxbsz) for i in range(0, bsz, maxbsz)]
+    
+        n_sub_batches = (bsz + maxbsz - 1) // maxbsz  # ceiling division
+
+        indices = []
+        remaining = bsz
+        start = 0
+        
+        for i in range(n_sub_batches):
+            size = (remaining + n_sub_batches - i - 1) // (n_sub_batches - i)
+            end = start + size
+            indices.append((start, end))
+            start = end
+            remaining -= size
+        
+        return indices
+
+    @torch.inference_mode()
     def generate(self, vocals: np.ndarray, instrumentals: np.ndarray, output_dir: str) -> List[np.array]:
         """
         Returns 2 parts as numpy arrays.
         """
         parts = [vocals, instrumentals]
         full_batch = []
-
-        # Collect up to 300 token (6s) segments for all parts
-        for output_idx, prompt in tqdm(enumerate(parts)):
-            prompt = self.get_codec_ids(prompt)
-            prompt = torch.as_tensor(prompt, dtype=torch.long)
-
-            segs = torch.split(prompt, 300, dim=-1)
-
-            for seg_idx, seg in enumerate(segs):
+        output_parts = [[] for _ in parts]
+        
+        # Pre-allocate device tensors
+        codec_ids_device = None
+        prompt_ids_device = None
+        
+        for output_idx, prompt in enumerate(parts):
+            # Convert to tensor directly with proper device placement
+            prompt = torch.tensor(self.get_codec_ids(prompt), dtype=torch.long)
+            
+            # Use efficient chunking with pre-calculated size
+            chunk_size = 300
+            n_chunks = (prompt.size(-1) + chunk_size - 1) // chunk_size  # ceiling division
+            
+            for seg_idx in range(n_chunks):
+                start_idx = seg_idx * chunk_size
+                end_idx = min(start_idx + chunk_size, prompt.size(-1))
+                seg = prompt[:, start_idx:end_idx]
                 seg_len = seg.shape[-1]
                 full_batch.append((seg_len, seg_idx, output_idx, seg))
-
-        # Prepare segments
-        prefix = torch.tensor([[self.mmtokenizer.soa, self.mmtokenizer.stage_1]], dtype=torch.long)
-        suffix = torch.tensor([[self.mmtokenizer.stage_2]], dtype=torch.long)
+        
         for i in range(len(full_batch)):
             seg_len, seg_idx, output_idx, codec_ids = full_batch[i]
-            prompt_ids = torch.cat((prefix, codec_ids, suffix), dim=-1)
+            prompt_ids = torch.cat((self.prefix, codec_ids, self.suffix), dim=-1)
             full_batch[i] = (seg_len, seg_idx, output_idx, codec_ids, prompt_ids)
-
-        # Group prompts by length
-        batches = {}
+        
+        length_batches = {}
         for seq in full_batch:
-            if not seq[0] in batches:
-                batches[seq[0]] = []
-            batches[seq[0]].append(seq)
-
-        # Split into on minibatches
+            seq_len = seq[0]
+            if seq_len not in length_batches:
+                length_batches[seq_len] = []
+            length_batches[seq_len].append(seq)
+        
+        # Split into mini-batches based on cache size
         split_batch = []
-        for idx, (seg_len, batch) in enumerate(batches.items()):
-            b_seg_order = [b[1] for b in batch]
-            b_part_order = [b[2] for b in batch]
-            b_codec_ids = torch.cat([b[3] for b in batch], dim=0)
-            b_prompt_ids = torch.cat([b[4] for b in batch], dim=0)
+        for seg_len, batch in length_batches.items():
+            b_seg_order = []
+            b_part_order = []
+            b_codec_ids_list = []
+            b_prompt_ids_list = []
+            
+            for b in batch:
+                b_seg_order.append(b[1])
+                b_part_order.append(b[2])
+                b_codec_ids_list.append(b[3])
+                b_prompt_ids_list.append(b[4])
 
-            max_bsz = self.cache_size // align(b_prompt_ids.shape[1] + b_codec_ids.shape[1] * 8, 32)
-            assert max_bsz > 0
-            for a, b in split_bsz(b_prompt_ids.shape[0], max_bsz):
-                split_batch.append((b_seg_order[a:b], b_part_order[a:b], b_codec_ids[a:b], b_prompt_ids[a:b]))
+            b_codec_ids = torch.cat(b_codec_ids_list, dim=0)
+            b_prompt_ids = torch.cat(b_prompt_ids_list, dim=0)
+            
+            seq_len_aligned = align(b_prompt_ids.shape[1] + b_codec_ids.shape[1] * 8, 32)
+            max_bsz = max(1, self.cache_size // seq_len_aligned)  # ensure at least 1
 
-        # Inference
-        output_parts = []
-        for _ in parts:
-            output_parts.append([])
+            total_examples = b_prompt_ids.shape[0]
+            for start_idx, end_idx in self.split_bsz(total_examples, max_bsz):
+                split_batch.append((
+                    b_seg_order[start_idx:end_idx],
+                    b_part_order[start_idx:end_idx],
+                    b_codec_ids[start_idx:end_idx],
+                    b_prompt_ids[start_idx:end_idx]
+                ))
 
-        for seg_order, part_order, codec_ids, prompt_ids in tqdm(split_batch):
-            codec_ids = codec_ids.to(self.device)
-            prompt_ids = prompt_ids.to(self.device)
-            batch_size, len_prompt = prompt_ids.shape
+        for seg_order, part_order, codec_ids, prompt_ids in split_batch:
+            # move to device once
+            if codec_ids_device is None or codec_ids_device.shape != codec_ids.shape:
+                codec_ids_device = torch.empty_like(codec_ids, device=self.device)
+            if prompt_ids_device is None or prompt_ids_device.shape != prompt_ids.shape:
+                prompt_ids_device = torch.empty_like(prompt_ids, device=self.device)
+                
+            codec_ids_device.copy_(codec_ids.to(self.device, non_blocking=True))
+            prompt_ids_device.copy_(prompt_ids.to(self.device, non_blocking=True))
+            
+            batch_size, len_prompt = prompt_ids_device.shape
 
-            cache = self.cache_mode(self.model, batch_size=batch_size, max_seq_len=align(prompt_ids.shape[1] + codec_ids.shape[1] * 8, 32))
+            max_output_len = len_prompt + codec_ids_device.shape[1] * 8
             output_ids = torch.empty((batch_size, 0), dtype=torch.long, device=self.device)
-
-            for frames_idx in tqdm(range(codec_ids.shape[1])):
-                cb0 = codec_ids[:, frames_idx : frames_idx + 1]
-
-                # Append the initial prompt to the first codec frame
+            # output_ids = output_ids.reserve_(batch_size, max_output_len)
+            
+            # Create optimized cache
+            seq_len_aligned = align(prompt_ids_device.shape[1] + codec_ids_device.shape[1] * 8, 32)
+            cache = self.cache_mode(self.model, batch_size=batch_size, max_seq_len=seq_len_aligned)
+            
+            for frames_idx in tqdm(range(codec_ids_device.shape[1])):
+                cb0 = codec_ids_device[:, frames_idx:frames_idx+1]
                 if frames_idx == 0:
-                    cb0 = torch.cat([prompt_ids, cb0], dim=-1)
-
-                # Forward prompt
+                    cb0 = torch.cat([prompt_ids_device, cb0], dim=-1)
+    
                 output_ids = torch.cat((output_ids, cb0), dim=-1)
                 logits = self.model.forward(cb0, cache=cache, last_id_only=True)
 
                 for i in range(7):
-
-                    # Slice logits instead of biasing start and end of distribution
-                    first_logit = 46358
-                    last_logit = 53526
-                    logits = logits[:, :, first_logit:last_logit]
-
-                    # Greedy sampling
-                    sample = logits.argmax(dim=-1) + first_logit
+                    logits_sliced = logits[:, :, self.first_logit:self.last_logit]
+                    sample = logits_sliced.argmax(dim=-1) + self.first_logit
                     output_ids = torch.cat((output_ids, sample), dim=-1)
-
-                    # TODO: Here, original asserts that we didn't sample mmtokenizer.eoa (can we just mask it out?)
-
-                    # Forward sample
+                
                     logits = self.model.forward(sample, cache=cache)
 
-            # Trim prompt
             output_ids = output_ids[:, len_prompt:]
-
-            # Split outputs
+            
             for i in range(batch_size):
-                output_parts[part_order[i]].append((seg_order[i], output_ids[i : i + 1, :]))
-
-            # Release cache tensors
+                output_parts[part_order[i]].append(
+                    (seg_order[i], output_ids[i:i+1, :])
+                )
+            
+            # Clean up cache explicitly
             del cache
             empty_gpu_cache(self.is_cuda, self.device_idx)
 
-        # Unshuffle and recombine output parts
-        output = []
-        for i, p in enumerate(output_parts):
-            p = sorted(p, key=lambda x: x[0])
-            part_o = torch.cat([pp[1] for pp in p], dim=-1).flatten().cpu().numpy()
-            part_o = self.codec_tool_stage2.ids2npy(part_o)
-            part_o = self.fix_output(part_o)
-            output.append(part_o)
+        final_outputs = []
+        for part_outputs in output_parts:
+            part_outputs.sort(key=lambda x: x[0])
+            part_tensors = [p[1] for p in part_outputs]
+            if len(part_tensors) > 1:
+                part_output = torch.cat(part_tensors, dim=-1).flatten().cpu().numpy()
+            else:
+                part_output = part_tensors[0].flatten().cpu().numpy()
 
-        return output
+            part_output = self.codec_tool_stage2.ids2npy(part_output)
+            part_output = self.fix_output(part_output)
+            final_outputs.append(part_output)
+        
+        return final_outputs
 
 
 # =========================================
@@ -926,10 +980,11 @@ class Stage1Producer(threading.Thread):
             
             print(f">> Stage 1 processing {args.genre_txt} and {args.lyrics_txt} ...")
 
-            start_event = torch.cuda.Event(enable_timing=True)
-            end_event = torch.cuda.Event(enable_timing=True)
+            # start_event = torch.cuda.Event(enable_timing=True)
+            # end_event = torch.cuda.Event(enable_timing=True)
 
-            start_event.record()
+            # start_event.record()
+            start = time.time()
             raw_output = self.pipeline.generate(
                 use_dual_tracks_prompt=args.use_dual_tracks_prompt,
                 vocal_track_prompt_path=args.vocal_track_prompt_path,
@@ -947,9 +1002,9 @@ class Stage1Producer(threading.Thread):
             vocals, instrumentals = self.pipeline.post_process_for_next_stage(
                 raw_output, args.use_audio_prompt, args.use_dual_tracks_prompt
             )
-            end_event.record()
-            torch.cuda.synchronize()
-            elapsed_time_ms = start_event.elapsed_time(end_event)
+            # end_event.record()
+            torch.cuda.synchronize(args.stage1_cuda_idx)
+            elapsed_time_ms = (time.time() - start) * 1000
             
             print(f">> Stage 1 execution time: {elapsed_time_ms} ms")
 
@@ -989,18 +1044,18 @@ class Stage2Consumer(threading.Thread):
             output_dir = f"{self.output_dir}/{uuid.uuid4().hex}"
             
             print(f"Stage 2 processing {output.genre_txt} and {output.lyrics_txt} ...")
-            start_event = torch.cuda.Event(enable_timing=True)
-            end_event = torch.cuda.Event(enable_timing=True)
-            start_event.record()
+            # start_event = torch.cuda.Event(enable_timing=True)
+            # end_event = torch.cuda.Event(enable_timing=True)
+            start = time.time()
             stage2_output = self.pipeline.generate(output.vocals, output.instrumentals, output_dir)
             post_process(
                 stage2_output[0], stage2_output[1], 
                 self.codec_model, self.vocal_decoder, self.inst_decoder, self.device, 
                 output_dir, self.rescale
             )
-            end_event.record()
-            torch.cuda.synchronize()
-            elapsed_time_ms = start_event.elapsed_time(end_event)
+            # end_event.record()
+            torch.cuda.synchronize(self.device.index)
+            elapsed_time_ms = (time.time() - start) * 1000
             print(f">> Stage 2 execution time: {elapsed_time_ms} ms")
 
             self.intermediate_queue.task_done()
@@ -1089,11 +1144,14 @@ def main():
         vocal_decoder, inst_decoder = build_codec_model(args.config_path, args.vocal_decoder_path, args.inst_decoder_path, device2)
         empty_gpu_cache(torch.cuda.is_available(), args.stage2_cuda_idx)
 
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
+    vocal_decoder.eval()
+    inst_decoder.eval()
+
+    # start_event1 = torch.cuda.Event(enable_timing=True)
+    # end_event1 = torch.cuda.Event(enable_timing=True)
 
     print(f">> Creating pipeline for stage 1 using exl2={args.stage1_use_exl2} on device:{args.stage1_cuda_idx} ...")
-    start_event.record()
+    start = time.time()
     if args.stage1_use_exl2:
         pipeline = Stage1Pipeline_EXL2(
             model_path=args.stage1_model,
@@ -1115,16 +1173,16 @@ def main():
             mmtokenizer=mmtokenizer,
             codec_model=codec_model if device is not None else codec_model1,
         )
-    end_event.record()
-    torch.cuda.synchronize()
-    elapsed_time_ms = start_event.elapsed_time(end_event)
+    # end_event1.record()
+    torch.cuda.synchronize(args.stage1_cuda_idx)
+    elapsed_time_ms = (time.time() - start) * 1000
     print(f"Stage 1 Pipeline creation execution time: {elapsed_time_ms:.4f} ms\n")
 
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
+    start_event2 = torch.cuda.Event(enable_timing=True)
+    end_event2 = torch.cuda.Event(enable_timing=True)
 
     print(f">> Creating pipeline for stage 2 using exl2={args.stage2_use_exl2} on device:{args.stage2_cuda_idx} ...")    
-    start_event.record()
+    start2 = time.time()
     if args.stage2_use_exl2:
         pipeline2 = Stage2Pipeline_EXL2(
             model_path=args.stage2_model,
@@ -1140,9 +1198,9 @@ def main():
             batch_size=args.stage2_batch_size,
             mmtokenizer=mmtokenizer,
         )
-    end_event.record()
-    torch.cuda.synchronize()
-    elapsed_time_ms = start_event.elapsed_time(end_event)
+    # end_event2.record()
+    torch.cuda.synchronize(args.stage2_cuda_idx)
+    elapsed_time_ms = (time.time() - start2) * 1000
     print(f"Stage 2 pipeline preparation execution time: {elapsed_time_ms:.4f} ms\n")
 
     stage1_thread = Stage1Producer(pipeline, input_queue, intermediate_queue)
