@@ -463,7 +463,6 @@ class Stage1Pipeline_EXL2(Stage1Pipeline):
                 # End on EOA
                 if sample[0].item() == self.mmtokenizer.eoa:
                     break
-                # empty_gpu_cache(self.is_cuda, self.device_idx)
                 
             # Make sure sequence ends with EOA if we reached max_new_tokens
             else:
@@ -471,10 +470,8 @@ class Stage1Pipeline_EXL2(Stage1Pipeline):
                 seq = torch.cat((seq, sample), dim=-1)
                 # Update cache with forced token
                 self.model.forward(sample, cache=cache)
-                # empty_gpu_cache(self.is_cuda, self.device_idx)
 
         raw_output = seq[:1, :]
-        # empty_gpu_cache(self.is_cuda, self.device_idx)
         return raw_output
 
 
