@@ -243,6 +243,7 @@ class Stage1Pipeline_HF(Stage1Pipeline):
         empty_gpu_cache(self.is_cuda)
         self.cache_size = cache_size
 
+    @torch.inference_mode()
     def generate(
         self,
         use_dual_tracks_prompt: bool,
@@ -308,7 +309,7 @@ class Stage1Pipeline_HF(Stage1Pipeline):
                 guidance_scale=sample_settings.guidance_scale_seg0 if i == 0 else sample_settings.guidance_scale,
                 past_key_values=past_key_values,
             )
-            empty_gpu_cache(self.is_cuda, self.device_idx)
+            # empty_gpu_cache(self.is_cuda, self.device_idx)
 
             if output_seq[0][-1].item() != self.mmtokenizer.eoa:
                 tensor_eoa = torch.tensor([[self.mmtokenizer.eoa]], dtype=torch.long, device=output_seq.device)
@@ -318,7 +319,7 @@ class Stage1Pipeline_HF(Stage1Pipeline):
             else:
                 raw_output = output_seq
 
-        empty_gpu_cache(self.is_cuda, self.device_idx)
+        # empty_gpu_cache(self.is_cuda, self.device_idx)
         return raw_output
 
 
@@ -462,7 +463,7 @@ class Stage1Pipeline_EXL2(Stage1Pipeline):
                 # End on EOA
                 if sample[0].item() == self.mmtokenizer.eoa:
                     break
-                empty_gpu_cache(self.is_cuda, self.device_idx)
+                # empty_gpu_cache(self.is_cuda, self.device_idx)
                 
             # Make sure sequence ends with EOA if we reached max_new_tokens
             else:
@@ -470,10 +471,10 @@ class Stage1Pipeline_EXL2(Stage1Pipeline):
                 seq = torch.cat((seq, sample), dim=-1)
                 # Update cache with forced token
                 self.model.forward(sample, cache=cache)
-                empty_gpu_cache(self.is_cuda, self.device_idx)
+                # empty_gpu_cache(self.is_cuda, self.device_idx)
 
         raw_output = seq[:1, :]
-        empty_gpu_cache(self.is_cuda, self.device_idx)
+        # empty_gpu_cache(self.is_cuda, self.device_idx)
         return raw_output
 
 
@@ -587,6 +588,7 @@ class Stage2Pipeline_HF(Stage2Pipeline):
         #     self.model = torch.compile(self.model)
         empty_gpu_cache(self.is_cuda, self.device_idx)
 
+    @torch.inference_mode()
     def generate_batch(self, prompt: np.array, batch_size: int):
         codec_ids, prompt_ids = self.prepare_prompt_batch(prompt, batch_size)
         len_prompt = prompt_ids.shape[-1]
@@ -616,7 +618,7 @@ class Stage2Pipeline_HF(Stage2Pipeline):
                 logits_processor=block_list,
                 past_key_values=past_key_values,
             )
-            empty_gpu_cache(self.is_cuda, self.device_idx)
+            # empty_gpu_cache(self.is_cuda, self.device_idx)
 
             assert stage2_output.shape[1] - prompt_ids.shape[1] == 7, f"output new tokens={stage2_output.shape[1]-prompt_ids.shape[1]}"
             prompt_ids = stage2_output
@@ -631,6 +633,7 @@ class Stage2Pipeline_HF(Stage2Pipeline):
 
         return output
 
+    @torch.inference_mode()
     def generate(self, vocals: np.ndarray, instrumentals: np.ndarray, output_dir: str) -> List[np.array]:
         """
         Returns vocals and instrumentals as numpy arrays.
@@ -669,7 +672,7 @@ class Stage2Pipeline_HF(Stage2Pipeline):
 
             output = self.fix_output(output)
             outputs.append(output)
-            empty_gpu_cache(self.is_cuda, self.device_idx)
+            # empty_gpu_cache(self.is_cuda, self.device_idx)
         return outputs
 
 
