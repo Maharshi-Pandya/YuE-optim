@@ -877,6 +877,7 @@ def save_audio(wav: torch.Tensor, path, sample_rate: int, rescale: bool = False)
     torchaudio.save(str(path), wav.detach().cpu(), sample_rate=sample_rate, encoding="PCM_S", bits_per_sample=16)
 
 
+@torch.inference_mode()
 def post_process(vocals: np.ndarray, instrumentals: np.ndarray, codec_model: SoundStream, vocal_decoder: VocosDecoder, inst_decoder: VocosDecoder, device: torch.device, output_dir: str, rescale: bool):
     # reconstruct tracks
     recons_output_dir = os.path.join(output_dir, "recons")
